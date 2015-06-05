@@ -1,0 +1,112 @@
+/*
+ * vm_global.h
+ *
+ *  Created on: May 27, 2015
+ *      Author: kangshiyu
+ */
+
+#ifndef VM_GLOBAL_H_
+#define VM_GLOBAL_H_
+
+#define AUXILIARY_SPACE_FILE "auxiliary_space" //Auxiliary Memory
+#define ACTUAL_MEM_SIZE 	(32*4)	//Actual Memory
+#define VIRTUAL_MEM_SIZE 	(64*4)	//Virtual Memory
+#define PAGE_SIZE			4		//page size
+#define SEC_PAGE_CNT		(VIRTUAL_MEM_SIZE / PAGE_SIZE)	//second-level page count
+#define FIR_PAGE_CNT		(SEC_PAGE_CNT / PAGE_SIZE)		//first-level page count
+#define ACTUAL_BLOCK_CNT	(ACTUAL_MEM_SIZE / PAGE_SIZE)	//Actual Block count
+#define PID_NUM		2		//2 programs use the memory
+
+#define ALGORITHM 0
+
+//读写权限
+#define READABLE	0x01
+#define WRITABLE	0x02
+#define EXECUTABLE	0x04
+
+#define MAX_VALUE	0xff
+
+#define FIFO	"vm_fifo"
+
+typedef enum
+{
+	READ_DENY,
+	WRITE_DENY,
+	EXECUTE_DENY,
+	INVALID_REQUEST,
+	OVER_BOUNDARY,
+	FILE_OPEN_FAILED,
+	FILE_CLOSE_FAILED,
+	FILE_SEEK_FAILED,
+	FILE_READ_FAILED,
+	FILE_WRITE_FAILED
+} ErrType;
+
+typedef enum
+{
+	TRUE = 1,
+	FALSE = 0
+} bool;
+
+typedef enum
+{
+	READ,WRITE,EXECUTE
+} ReqType;
+
+typedef struct
+{
+	unsigned int pid;
+	unsigned int upperbound;
+	unsigned int lowerbound;
+} PCB;
+
+typedef struct
+{
+	unsigned int page_num;
+	unsigned int index_num;
+} FirstPageTableItem,*FirstPageTablePtr;
+
+typedef struct
+{
+	unsigned int page_num;
+	unsigned int block_num;
+	bool filled;
+	bool changed;
+	unsigned char pro_type;
+	unsigned long aux_addr;
+	unsigned long cnt;
+	unsigned int no_use;
+} SecondPageTableItem, *SecondPageTablePtr;
+
+typedef struct
+{
+	ReqType req_Type;
+	unsigned long virtual_addr;
+	unsigned char value;
+} MemoryAccessRequest,*MemoryAccessRequestPtr;
+
+void init();
+
+void do_request(MemoryAccessRequestPtr);
+void do_response();
+
+void do_page_in(SecondPageTablePtr,unsigned int);
+void do_page_out(SecondPageTablePtr);
+void do_page_fault(SecondPageTablePtr);
+
+void do_LFU(SecondPageTablePtr);
+void do_LRU(SecondPageTablePtr);
+void do_FIFO(SecondPageTablePtr);
+void do_LRU(SecondPageTablePtr);
+
+void PrintPageInfo();
+
+void ErrHandler(ErrType);
+
+void time_change(unsigned int);
+
+char *get_protype_str(char *str,unsigned char type);
+
+
+
+#endif /* VM_GLOBAL_H_ */

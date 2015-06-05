@@ -1,0 +1,507 @@
+/*
+ * vm_manager.c
+ *
+ *  Created on: May 27, 2015
+ *      Author: kangshiyu
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <linux/stat.h>
+#include <time.h>
+#include "vm_global.h"
+#include <fcntl.h>
+
+unsigned char actual_memory[ACTUAL_MEM_SIZE];
+FILE *AuxMemPtr;
+SecondPageTableItem SecondPageTable[SEC_PAGE_CNT];
+FirstPageTableItem FirstPageTable[FIR_PAGE_CNT];
+bool BlockStat[ACTUAL_BLOCK_CNT];
+MemoryAccessRequestPtr MemRequest;
+unsigned int Time[SEC_PAGE_CNT];
+PCB pcb[PID_NUM];
+unsigned int exec_times;
+int time_n;
+int work_id;
+
+int main()
+{
+	char c;
+	int i,read_num = 0;
+	FILE *fp;
+	if ((AuxMemPtr = fopen(AUXILIARY_SPACE_FILE,"r+")) == NULL)
+	{
+		ErrHandler(FILE_OPEN_FAILED);
+		exit(1);
+	}
+	init();
+	PrintPageInfo();
+	MemRequest = (MemoryAccessRequestPtr) malloc(sizeof(MemoryAccessRequest));
+	unlink(FIFO);
+	umask(0);
+	mkfifo(FIFO,0666);
+	fp = fopen(FIFO,"r");
+	int cnt = 0;
+	int fd = open(FIFO,O_RDONLY|O_NONBLOCK);
+	while (1)
+	{
+		//fp = fopen(FIFO,"r");
+		if ((read_num = read(fd,MemRequest,sizeof(MemoryAccessRequest)))==0)//,1,fp)) == 0)
+		{
+			printf("没有访存请求...\n");
+			printf("输入Ｃ取消，输入其他的来继续\n");
+			if ((c = getchar()) == 'c' || c == 'C')
+			{
+				break;
+			}
+			else
+			{
+				continue;
+			}
+		}
+		if (cnt++ == 0) continue;
+		do_response();
+		printf("输入Ｐ把页表和存储器打印\n");
+		if ((c = getchar()) == 'p' || c == 'P')
+		{
+			PrintPageInfo();
+			PrintMem();
+		}
+		while (c != '\n')
+		{
+			c = getchar();
+		}
+		printf("输入Ｃ取消，输入其他的来继续\n");
+		if ((c = getchar()) == 'c' || c == 'C')
+		{
+			break;
+		}
+		while (c != '\n')
+		{
+			c = getchar();
+		}
+		//fclose(fp);
+	}
+	fclose(fp);
+	close(fd);
+	if (fclose(AuxMemPtr) == EOF)
+	{
+		ErrHandler(FILE_CLOSE_FAILED);
+		exit(1);
+	}
+	return 0;
+}
+
+void init()
+{
+	int i,j,k;
+	srand(time(NULL));
+	time_n = 0;
+	exec_times = 0;
+	for (k = 0; k < FIR_PAGE_CNT; k++)
+	{
+		FirstPageTable[k].page_num = k;
+		FirstPageTable[k].index_num = k * PAGE_SIZE;
+		for (i = k * PAGE_SIZE; i < (k + 1) * PAGE_SIZE; i++)
+		{
+			//printf("%d\n",i);
+			SecondPageTable[i].page_num = i;
+			SecondPageTable[i].filled = FALSE;
+			SecondPageTable[i].changed = FALSE;
+			SecondPageTable[i].cnt = 0;
+			int tmp = rand() % 7;
+			printf("%d\n",tmp);
+			switch(tmp)
+			{
+				case 0:
+				{
+					SecondPageTable[i].pro_type = READABLE;
+					break;
+				}
+				case 1:
+				{
+					SecondPageTable[i].pro_type = WRITABLE;
+					break;
+				}
+				case 2:
+				{
+					SecondPageTable[i].pro_type = EXECUTABLE;
+					break;
+				}
+				case 3:
+				{
+					SecondPageTable[i].pro_type = READABLE|WRITABLE;
+					break;
+				}
+				case 4:
+				{
+					SecondPageTable[i].pro_type = READABLE|EXECUTABLE;
+					break;
+				}
+				case 5:
+				{
+					SecondPageTable[i].pro_type = WRITABLE|EXECUTABLE;
+					break;
+				}
+				case 6:
+				{
+					SecondPageTable[i].pro_type = WRITABLE|READABLE|EXECUTABLE;
+					break;
+				}
+			}
+			SecondPageTable[i].aux_addr = i * PAGE_SIZE * 2;
+		}
+	}
+	//PrintPageInfo();
+	for (j = 0; j < ACTUAL_BLOCK_CNT; j++)
+	{
+		if (rand() % 2 == 0)
+		{
+			do_page_in(&SecondPageTable[j],j);
+			SecondPageTable[j].block_num = j;
+			SecondPageTable[j].filled = TRUE;
+			BlockStat[j] = TRUE;
+			Time[time_n++] = SecondPageTable[j].page_num;
+		}
+		else
+		{
+			BlockStat[j] = FALSE;
+		}
+	}
+	pcb[0].pid = 1;
+	pcb[0].lowerbound = 0;
+	pcb[0].upperbound = 7;
+	pcb[1].pid = 2;
+	pcb[1].lowerbound = 8;
+	pcb[1].upperbound = 15;
+}
+
+void do_response()
+{
+	SecondPageTablePtr ptr = NULL;
+	unsigned int first_page_num,first_page_offset,offset,second_page_num,actual_address,i;
+	if (MemRequest->virtual_addr < 0 || MemRequest->virtual_addr > VIRTUAL_MEM_SIZE)
+	{
+		ErrHandler(OVER_BOUNDARY);
+		return;
+	}
+	first_page_num = (MemRequest->virtual_addr / PAGE_SIZE) / PAGE_SIZE;
+	first_page_offset = (MemRequest->virtual_addr / PAGE_SIZE) % PAGE_SIZE;
+	offset = (MemRequest->virtual_addr) % PAGE_SIZE;
+	for ( i = 0; i < PID_NUM; i++)
+	{
+		if (first_page_num >= pcb[i].lowerbound && first_page_num <= pcb[i].upperbound)
+		{
+			work_id = pcb[i].pid;
+		}
+	}
+	second_page_num = FirstPageTable[first_page_num].index_num + first_page_offset;
+	printf("Pid : %u\t Page Number: %u\t Offset %u\n",work_id,second_page_num,offset);
+	ptr = &SecondPageTable[second_page_num];
+	if (!ptr->filled)
+	{
+		do_page_fault(ptr);
+	}
+	ptr->no_use = exec_times++;
+	actual_address = ptr->block_num * PAGE_SIZE + offset;
+	printf("The actual address is %u\n",actual_address);
+	switch(MemRequest->req_Type)
+	{
+		case READ:
+		{
+			ptr->cnt++;
+			if ((ptr->pro_type&READABLE) == 0)
+			{
+				ErrHandler(READ_DENY);
+				return;
+			}
+			printf("读取成功！Value is %02X\n",actual_memory[actual_address]);
+			break;
+		}
+		case WRITE:
+		{
+			ptr->cnt++;
+			if ((ptr->pro_type&WRITABLE) == 0)
+			{
+				ErrHandler(WRITE_DENY);
+				return;
+			}
+			printf("%d %d\n",actual_address,MemRequest->value);
+			actual_memory[actual_address] = MemRequest->value;
+			ptr->changed = TRUE;
+			printf("写入成功！\n");
+			break;
+		}
+		case EXECUTE:
+		{
+			ptr->cnt++;
+			if ((ptr->pro_type&EXECUTABLE) == 0)
+			{
+				ErrHandler(EXECUTE_DENY);
+				return;
+			}
+			printf("执行成功！\n");
+			break;
+		}
+		default:
+		{
+			ErrHandler(INVALID_REQUEST);
+			return;
+		}
+	}
+}
+
+void do_page_in(SecondPageTablePtr ptr,unsigned int block_num)
+{
+	unsigned int read_num;
+	if (fseek(AuxMemPtr,ptr->aux_addr,SEEK_SET) < 0)
+	{
+		ErrHandler(FILE_SEEK_FAILED);
+		exit(1);
+	}
+	if ((read_num = fread(&actual_memory[block_num*PAGE_SIZE],sizeof(unsigned char),PAGE_SIZE,AuxMemPtr)) < PAGE_SIZE)
+	{
+		ErrHandler(FILE_READ_FAILED);
+		exit(1);
+	}
+	printf("读页成功: 辅存地址　%u\t　物理块　%u\n",ptr->aux_addr,block_num);
+}
+
+void do_page_out(SecondPageTablePtr ptr)
+{
+	unsigned int write_num;
+	if (fseek(AuxMemPtr,ptr->aux_addr,SEEK_SET) < 0)
+	{
+		ErrHandler(FILE_SEEK_FAILED);
+		exit(1);
+	}
+	if ((write_num = fwrite(&actual_memory[ptr->block_num*PAGE_SIZE],sizeof(unsigned char),PAGE_SIZE,AuxMemPtr)) < PAGE_SIZE)
+	{
+		ErrHandler(FILE_WRITE_FAILED);
+		exit(1);
+	}
+	printf("写回成功！　物理块 : %u\t 辅存地址　: %u\n",ptr->block_num,ptr->aux_addr);
+}
+
+void do_page_fault(SecondPageTablePtr ptr)
+{
+	unsigned int i;
+	//char c;
+	for (i = 0; i < ACTUAL_BLOCK_CNT; i++)
+	{
+		if (!BlockStat[i])
+		{
+			do_page_in(ptr,i);
+			ptr->block_num = i;
+			ptr->filled = TRUE;
+			ptr->changed = FALSE;
+			ptr->cnt = 0;
+			BlockStat[i] = TRUE;
+			return;
+		}
+	}
+	void (*func[3])(SecondPageTablePtr) = {do_FIFO,do_LFU,do_LRU};
+	//while (c = getchar(),!(c >= '1' && c <='3'));
+	(*func[ALGORITHM])(ptr);
+}
+
+void do_LFU(SecondPageTablePtr ptr)
+{
+	unsigned int i,min_use,page;
+	printf("LFU开始\n");
+	min_use = 0xffffffff;
+	page = 0;
+	for (i = 0; i < SEC_PAGE_CNT; i++)
+	{
+		if (SecondPageTable[i].cnt < min_use && SecondPageTable[i].filled == TRUE)
+		{
+			min_use = SecondPageTable[i].cnt;
+			page = SecondPageTable[i].page_num;
+		}
+	}
+	//printf("替换页面 : %u \n"，page);
+	printf("替换页面 : %u \n",page);
+	if (SecondPageTable[page].changed)
+	{
+		printf("该页被修改，写回辅存\n");
+		do_page_out(SecondPageTable + page);
+	}
+	SecondPageTable[page].changed = FALSE, SecondPageTable[page].cnt = 0,SecondPageTable[page].cnt = 0,SecondPageTable[page].filled = FALSE;
+	do_page_in(ptr,SecondPageTable[page].block_num);
+
+	ptr->block_num = SecondPageTable[page].block_num;
+	ptr->changed = FALSE,ptr->cnt = 0,ptr->filled = TRUE;
+	//time_change(ptr->page_num);
+}
+
+void PrintMem()
+{
+	int i,j;
+	for (i = 0; i < ACTUAL_BLOCK_CNT; i++)
+	{
+		for (j = 0; j < PAGE_SIZE; j++)
+		{
+			printf("%02X ",actual_memory[i * PAGE_SIZE+j]);
+		}
+		printf("\n");
+	}
+	FILE *p = fopen(AUXILIARY_SPACE_FILE,"r+");
+	char c;
+	while ((c = fgetc(p)) != EOF)
+	{
+		putchar(c);
+	}
+	fclose(p);
+}
+
+void do_FIFO(SecondPageTablePtr ptr)
+{
+	unsigned int firstcome;
+	firstcome = Time[0];
+	printf("FIFO开始\n");
+	printf("替换页面 : %u \n",firstcome);
+	if (SecondPageTable[firstcome].changed)
+	{
+		printf("该页被修改，写回辅存\n");
+		do_page_out(SecondPageTable+firstcome);
+	}
+	SecondPageTable[firstcome].changed = FALSE, SecondPageTable[firstcome].cnt = 0,SecondPageTable[firstcome].cnt = 0,SecondPageTable[firstcome].filled = FALSE;
+	do_page_in(ptr,SecondPageTable[firstcome].block_num);
+
+	ptr->block_num = SecondPageTable[firstcome].block_num;
+	ptr->changed = FALSE,ptr->cnt = 0,ptr->filled = TRUE;
+	time_change(ptr->page_num);
+}
+
+void do_LRU(SecondPageTablePtr ptr)
+{
+	unsigned int i,min_use,page;
+	printf("LRU开始\n");
+	min_use = 0xffffffff;
+	page = 0;
+	for (i = 0; i < SEC_PAGE_CNT; i++)
+	{
+		if (SecondPageTable[i].no_use < min_use && SecondPageTable[i].filled == TRUE)
+		{
+			min_use = SecondPageTable[i].no_use;
+			page = SecondPageTable[i].page_num;
+		}
+	}
+	//printf("替换页面 : %u \n"，page);
+	printf("替换页面 : %u \n",page);
+	if (SecondPageTable[page].changed)
+	{
+		printf("该页被修改，写回辅存\n");
+		do_page_out(SecondPageTable + page);
+	}
+	SecondPageTable[page].changed = FALSE, SecondPageTable[page].cnt = 0,SecondPageTable[page].no_use = 0,SecondPageTable[page].filled = FALSE;
+	do_page_in(ptr,SecondPageTable[page].block_num);
+
+	ptr->block_num = SecondPageTable[page].block_num;
+	ptr->changed = FALSE,ptr->cnt = 0,ptr->filled = TRUE;
+	//time_change(ptr->page_num);
+}
+
+void time_change(unsigned int num)
+{
+	int i;
+	for (i = 0; i < time_n - 1; i++)
+	{
+		Time[i] = Time[i+1];
+	}
+	Time[time_n] = num;
+}
+
+void ErrHandler(ErrType errtype)
+{
+	switch(errtype)
+	{
+		case READ_DENY:
+		{
+			printf("访存失败：该地址内容不可读\n");
+			break;
+		}
+		case WRITE_DENY:
+		{
+			printf("访存失败：该地址内容不可写\n");
+			break;
+		}
+		case EXECUTE_DENY:
+		{
+			printf("访存失败：该地址内容不可执行\n");
+			break;
+		}
+		case INVALID_REQUEST:
+		{
+			printf("访存失败：非法访存请求\n");
+			break;
+		}
+		case OVER_BOUNDARY:
+		{
+			printf("访存失败：地址越界\n");
+			break;
+		}
+		case FILE_OPEN_FAILED:
+		{
+			printf("系统错误：打开文件失败\n");
+			break;
+		}
+		case FILE_CLOSE_FAILED:
+		{
+			printf("系统错误：关闭文件失败\n");
+			break;
+		}
+		case FILE_SEEK_FAILED:
+		{
+			printf("系统错误：文件指针定位失败\n");
+			break;
+		}
+		case FILE_READ_FAILED:
+		{
+			printf("系统错误：读取文件失败\n");
+			break;
+		}
+		case FILE_WRITE_FAILED:
+		{
+			printf("系统错误：写入文件失败\n");
+			break;
+		}
+		default:
+		{
+			printf("出了一些乱七八糟的错误\n");
+		}
+	}
+}
+
+void PrintPageInfo()
+{
+	unsigned int i,j,k;
+	//unsigned char str[4];
+	printf("页号\t块号\t装入\t修改\t保护\t计数\t辅存\n");
+	for (i = 0; i < FIR_PAGE_CNT; i++)
+	{
+		for (j = 0; j < PAGE_SIZE; j++)
+		{
+			unsigned char str[4];
+			k = FirstPageTable[i].index_num + j;
+			//printf("Page Num : %d\n",k);
+			printf("%u\t%u\t%u\t%u\t%s\t%u\t%u\n",SecondPageTable[k].page_num,SecondPageTable[k].block_num,SecondPageTable[k].filled,SecondPageTable[k].changed,get_protype_str(str,SecondPageTable[k].pro_type),SecondPageTable[k].cnt,SecondPageTable[k].aux_addr);
+		}
+	}
+}
+
+char *get_protype_str(char *str,unsigned char type)
+{
+	//printf("%d\n",type);
+	//printf("%d %d %d\n", type & READABLE, type & WRITABLE, type & EXECUTABLE);
+	str[0] = ((type & READABLE) == 0)?'-':'r';
+	str[1] = ((type & WRITABLE) == 0)?'-':'w';
+	str[2] = ((type & EXECUTABLE) == 0)?'-':'x';
+	str[3] = 0;
+	//printf("%s\n",str);
+	return str;
+}
